@@ -13,7 +13,7 @@ import os
 # ==========================================
 SQLALCHEMY_DATABASE_URL = os.getenv(
     "DATABASE_URL", 
-    "sqlite:///./miao_erp.db" # 預設回退機制
+    "sqlite:///./miao_erp.db"
 )
 
 if SQLALCHEMY_DATABASE_URL.startswith("postgres://"):
@@ -43,7 +43,6 @@ class Order(Base):
     note = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
-# 啟動時自動在雲端建立資料表
 Base.metadata.create_all(bind=engine)
 
 # ==========================================
@@ -72,7 +71,7 @@ app.add_middleware(
 def read_root():
     return {"status": "success", "message": "喵逮雞 Cloud Run 伺服器與 Neon 資料庫成功上線！🚀"}
 
-# 🚨 新增：接收前端訂單的專屬通道 🚨
+# --- (原本的) 接收前端訂單 API ---
 @app.post("/api/orders")
 def create_orders(orders: List[OrderData]):
     db = SessionLocal()
@@ -93,5 +92,44 @@ def create_orders(orders: List[OrderData]):
         return {"status": "error", "message": str(e)}
     finally:
         db.close()
-        
     return {"status": "success", "message": f"成功寫入 {saved_count} 筆訂單至雲端資料庫！"}
+
+# ==========================================
+# 💼 新增：老闆專屬的戰情室 API 💼
+# ==========================================
+
+# 1. 查詢歷史訂單清單 (取得最新 100 筆)
+@app.get("/api/orders")
+def get_orders():
+    db = SessionLocal()
+    try:
+        # 依照時間由新到舊排序 (.desc())
+        orders = db.query(Order).order_by(Order.created_at.desc()).limit(100).all()
+        return {"status": "success", "data": orders}
+    finally:
+        db.close()
+
+# 2. 查詢今日營業額統計
+@app.get("/api/stats/today")
+def get_today_stats():
+    db = SessionLocal()
+    try:
+        # 抓取過去 24 小時的訂單當作「今日」
+        twenty_four_hours_ago = datetime.datetime.utcnow() - datetime.timedelta(hours=24)
+        today_orders = db.query(Order).filter(Order.created_at >= twenty_four_hours_ago).all()
+        
+        # 老闆最關心的三個數字：總單數、已收現款、未收呆帳
+        total_orders_count = len(today_orders)
+        revenue_received = sum(o.total_amount for o in today_orders if o.received)
+        revenue_unpaid = sum(o.total_amount for o in today_orders if not o.received)
+
+        return {
+            "status": "success",
+            "data": {
+                "total_orders_count": total_orders_count,
+                "revenue_received": revenue_received,
+                "revenue_unpaid": revenue_unpaid
+            }
+        }
+    finally:
+        db.close()
