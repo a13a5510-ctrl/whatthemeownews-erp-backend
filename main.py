@@ -24,14 +24,14 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # ==========================================
-# 2. 定義資料表 Schema
+# 2. 定義資料表 Schema (🌟 新增進銷存架構)
 # ==========================================
 class Product(Base):
     __tablename__ = "products"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
     price = Column(Integer)
-    cost = Column(Integer, default=0)
+    cost = Column(Float, default=0.0)
     is_active = Column(Boolean, default=True)
 
 class Order(Base):
@@ -42,6 +42,23 @@ class Order(Base):
     received = Column(Boolean, default=False)
     note = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+# 🌟 新增：原物料庫存表 (Warehouse)
+class Material(Base):
+    __tablename__ = "materials"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True)   # 雞蛋、麵粉...
+    unit = Column(String)                            # 單位 (克、顆、毫升)
+    stock_qty = Column(Float, default=0.0)           # 庫存餘額
+    unit_cost = Column(Float, default=0.0)           # 單位平均成本
+
+# 🌟 新增：產品配方表 (BOM)
+class RecipeItem(Base):
+    __tablename__ = "recipe_items"
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"))
+    material_id = Column(Integer, ForeignKey("materials.id"))
+    consume_qty = Column(Float)                      # 賣出一份要扣除多少材料
 
 Base.metadata.create_all(bind=engine)
 
@@ -71,7 +88,6 @@ app.add_middleware(
 def read_root():
     return {"status": "success", "message": "喵逮雞 Cloud Run 伺服器與 Neon 資料庫成功上線！🚀"}
 
-# --- (原本的) 接收前端訂單 API ---
 @app.post("/api/orders")
 def create_orders(orders: List[OrderData]):
     db = SessionLocal()
@@ -94,31 +110,22 @@ def create_orders(orders: List[OrderData]):
         db.close()
     return {"status": "success", "message": f"成功寫入 {saved_count} 筆訂單至雲端資料庫！"}
 
-# ==========================================
-# 💼 新增：老闆專屬的戰情室 API 💼
-# ==========================================
-
-# 1. 查詢歷史訂單清單 (取得最新 100 筆)
 @app.get("/api/orders")
 def get_orders():
     db = SessionLocal()
     try:
-        # 依照時間由新到舊排序 (.desc())
         orders = db.query(Order).order_by(Order.created_at.desc()).limit(100).all()
         return {"status": "success", "data": orders}
     finally:
         db.close()
 
-# 2. 查詢今日營業額統計
 @app.get("/api/stats/today")
 def get_today_stats():
     db = SessionLocal()
     try:
-        # 抓取過去 24 小時的訂單當作「今日」
         twenty_four_hours_ago = datetime.datetime.utcnow() - datetime.timedelta(hours=24)
         today_orders = db.query(Order).filter(Order.created_at >= twenty_four_hours_ago).all()
         
-        # 老闆最關心的三個數字：總單數、已收現款、未收呆帳
         total_orders_count = len(today_orders)
         revenue_received = sum(o.total_amount for o in today_orders if o.received)
         revenue_unpaid = sum(o.total_amount for o in today_orders if not o.received)
@@ -131,5 +138,49 @@ def get_today_stats():
                 "revenue_unpaid": revenue_unpaid
             }
         }
+    finally:
+        db.close()
+
+# ==========================================
+# 📦 新增：進銷存專區 (老闆專屬) 📦
+# ==========================================
+
+# 1. 自動初始化倉庫 (一鍵將五大天王進貨建檔)
+@app.get("/api/init_inventory")
+def init_inventory():
+    db = SessionLocal()
+    try:
+        # 大師先幫您設定一批初始的安全庫存與測試成本
+        initial_materials = [
+            {"name": "雞蛋", "unit": "顆", "stock_qty": 300, "unit_cost": 5.0},
+            {"name": "低筋麵粉", "unit": "克", "stock_qty": 10000, "unit_cost": 0.05}, 
+            {"name": "泡打粉", "unit": "克", "stock_qty": 1000, "unit_cost": 0.2},
+            {"name": "油", "unit": "毫升", "stock_qty": 5000, "unit_cost": 0.1},
+            {"name": "糖", "unit": "克", "stock_qty": 5000, "unit_cost": 0.04}
+        ]
+        
+        added_count = 0
+        for mat in initial_materials:
+            existing = db.query(Material).filter(Material.name == mat["name"]).first()
+            if not existing:
+                new_mat = Material(**mat)
+                db.add(new_mat)
+                added_count += 1
+        
+        db.commit()
+        return {"status": "success", "message": f"成功建檔 {added_count} 項核心原物料！"}
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        db.close()
+
+# 2. 查詢倉庫目前庫存與單位成本
+@app.get("/api/inventory")
+def get_inventory():
+    db = SessionLocal()
+    try:
+        materials = db.query(Material).all()
+        return {"status": "success", "data": materials}
     finally:
         db.close()
