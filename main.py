@@ -9,7 +9,7 @@ import datetime
 import os
 
 # ==========================================
-# 1. 雲端資料庫連線設定 (PostgreSQL)
+# 1. 雲端資料庫連線設定 (PostgreSQL) - 已加入防斷線機制
 # ==========================================
 SQLALCHEMY_DATABASE_URL = os.getenv(
     "DATABASE_URL", 
@@ -69,7 +69,6 @@ class OrderData(BaseModel):
     received: bool
     note: Optional[str] = ""
 
-# 這是 admin.html 傳過來的格式
 class RecipeInput(BaseModel):
     material_id: int
     consume_qty: float
@@ -78,6 +77,12 @@ class ProductCreate(BaseModel):
     name: str
     price: int
     recipes: List[RecipeInput]
+
+# 🌟 新增：用來接收「新增材料」的格式
+class MaterialInput(BaseModel):
+    name: str
+    unit: str
+    unit_cost: float
 
 # ==========================================
 # 4. 初始化 FastAPI 伺服器與路由
@@ -96,7 +101,7 @@ app.add_middleware(
 def read_root():
     return {"status": "success", "message": "喵逮雞 Cloud Run 伺服器運作中🚀"}
 
-# --- POS 結帳 API ---
+# --- POS 結帳與戰情室 API ---
 @app.post("/api/orders")
 def create_orders(orders: List[OrderData]):
     db = SessionLocal()
@@ -114,7 +119,6 @@ def create_orders(orders: List[OrderData]):
         db.close()
     return {"status": "success", "message": f"成功寫入 {saved_count} 筆訂單！"}
 
-# --- 戰情室 API ---
 @app.get("/api/orders")
 def get_orders():
     db = SessionLocal()
@@ -146,7 +150,6 @@ def get_today_stats():
 def init_inventory():
     db = SessionLocal()
     try:
-        # 這裡設定了您的五大天王
         initial_materials = [
             {"name": "雞蛋", "unit": "顆", "stock_qty": 300, "unit_cost": 5.0},
             {"name": "低筋麵粉", "unit": "克", "stock_qty": 10000, "unit_cost": 0.05}, 
@@ -171,12 +174,30 @@ def init_inventory():
 def get_inventory():
     db = SessionLocal()
     try:
-        materials = db.query(Material).all()
+        materials = db.query(Material).order_by(Material.id.desc()).all()
         return {"status": "success", "data": materials}
     finally:
         db.close()
 
-# 🌟 新增：老闆建檔新口味的專屬通道
+# 🌟 新增：老闆在前端「快速新增材料」的 API
+@app.post("/api/materials")
+def create_material(mat: MaterialInput):
+    db = SessionLocal()
+    try:
+        exist = db.query(Material).filter(Material.name == mat.name).first()
+        if exist:
+            return {"status": "error", "message": f"材料「{mat.name}」已經存在囉！"}
+        
+        new_mat = Material(name=mat.name, unit=mat.unit, unit_cost=mat.unit_cost, stock_qty=0.0)
+        db.add(new_mat)
+        db.commit()
+        return {"status": "success", "message": f"成功新增材料：{mat.name}"}
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        db.close()
+
 @app.post("/api/admin/products")
 def create_full_product(data: ProductCreate):
     db = SessionLocal()
@@ -184,11 +205,9 @@ def create_full_product(data: ProductCreate):
         new_prod = Product(name=data.name, price=data.price)
         db.add(new_prod)
         db.flush() 
-        
         for r in data.recipes:
             new_recipe = RecipeItem(product_id=new_prod.id, material_id=r.material_id, consume_qty=r.consume_qty)
             db.add(new_recipe)
-        
         db.commit()
         return {"status": "success", "message": f"【{data.name}】口味與配方已成功建檔！"}
     except Exception as e:
