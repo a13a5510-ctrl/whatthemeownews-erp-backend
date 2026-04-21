@@ -43,6 +43,43 @@ class Order(Base):
     note = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
+# 定義前端傳過來的「產品+配方」包裹格式
+class RecipeInput(BaseModel):
+    material_id: int
+    consume_qty: float
+
+class ProductCreate(BaseModel):
+    name: str
+    price: int
+    recipes: List[RecipeInput]
+
+# 🌟 新增：建立新口味與配方的 API
+@app.post("/api/admin/products")
+def create_full_product(data: ProductCreate):
+    db = SessionLocal()
+    try:
+        # 1. 先建立產品
+        new_prod = Product(name=data.name, price=data.price)
+        db.add(new_prod)
+        db.flush() # 取得剛產生的產品 ID
+        
+        # 2. 建立該產品的 BOM 配方
+        for r in data.recipes:
+            new_recipe = RecipeItem(
+                product_id=new_prod.id,
+                material_id=r.material_id,
+                consume_qty=r.consume_qty
+            )
+            db.add(new_recipe)
+        
+        db.commit()
+        return {"status": "success", "message": f"【{data.name}】口味與配方已成功建檔！"}
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        db.close()
+
 # 🌟 新增：原物料庫存表 (Warehouse)
 class Material(Base):
     __tablename__ = "materials"
