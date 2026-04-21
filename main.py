@@ -24,7 +24,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # ==========================================
-# 2. 定義資料表 Schema (🌟 新增進銷存架構)
+# 2. 定義資料表 Schema
 # ==========================================
 class Product(Base):
     __tablename__ = "products"
@@ -43,59 +43,20 @@ class Order(Base):
     note = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
-# 定義前端傳過來的「產品+配方」包裹格式
-class RecipeInput(BaseModel):
-    material_id: int
-    consume_qty: float
-
-class ProductCreate(BaseModel):
-    name: str
-    price: int
-    recipes: List[RecipeInput]
-
-# 🌟 新增：建立新口味與配方的 API
-@app.post("/api/admin/products")
-def create_full_product(data: ProductCreate):
-    db = SessionLocal()
-    try:
-        # 1. 先建立產品
-        new_prod = Product(name=data.name, price=data.price)
-        db.add(new_prod)
-        db.flush() # 取得剛產生的產品 ID
-        
-        # 2. 建立該產品的 BOM 配方
-        for r in data.recipes:
-            new_recipe = RecipeItem(
-                product_id=new_prod.id,
-                material_id=r.material_id,
-                consume_qty=r.consume_qty
-            )
-            db.add(new_recipe)
-        
-        db.commit()
-        return {"status": "success", "message": f"【{data.name}】口味與配方已成功建檔！"}
-    except Exception as e:
-        db.rollback()
-        return {"status": "error", "message": str(e)}
-    finally:
-        db.close()
-
-# 🌟 新增：原物料庫存表 (Warehouse)
 class Material(Base):
     __tablename__ = "materials"
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, index=True)   # 雞蛋、麵粉...
-    unit = Column(String)                            # 單位 (克、顆、毫升)
-    stock_qty = Column(Float, default=0.0)           # 庫存餘額
-    unit_cost = Column(Float, default=0.0)           # 單位平均成本
+    name = Column(String, unique=True, index=True)   
+    unit = Column(String)                            
+    stock_qty = Column(Float, default=0.0)           
+    unit_cost = Column(Float, default=0.0)           
 
-# 🌟 新增：產品配方表 (BOM)
 class RecipeItem(Base):
     __tablename__ = "recipe_items"
     id = Column(Integer, primary_key=True, index=True)
     product_id = Column(Integer, ForeignKey("products.id"))
     material_id = Column(Integer, ForeignKey("materials.id"))
-    consume_qty = Column(Float)                      # 賣出一份要扣除多少材料
+    consume_qty = Column(Float)                      
 
 Base.metadata.create_all(bind=engine)
 
@@ -107,6 +68,16 @@ class OrderData(BaseModel):
     total_amount: int
     received: bool
     note: Optional[str] = ""
+
+# 這是 admin.html 傳過來的格式
+class RecipeInput(BaseModel):
+    material_id: int
+    consume_qty: float
+
+class ProductCreate(BaseModel):
+    name: str
+    price: int
+    recipes: List[RecipeInput]
 
 # ==========================================
 # 4. 初始化 FastAPI 伺服器與路由
@@ -123,20 +94,16 @@ app.add_middleware(
 
 @app.get("/")
 def read_root():
-    return {"status": "success", "message": "喵逮雞 Cloud Run 伺服器與 Neon 資料庫成功上線！🚀"}
+    return {"status": "success", "message": "喵逮雞 Cloud Run 伺服器運作中🚀"}
 
+# --- POS 結帳 API ---
 @app.post("/api/orders")
 def create_orders(orders: List[OrderData]):
     db = SessionLocal()
     saved_count = 0
     try:
         for o in orders:
-            new_order = Order(
-                order_no=o.order_no,
-                total_amount=o.total_amount,
-                received=o.received,
-                note=o.note
-            )
+            new_order = Order(order_no=o.order_no, total_amount=o.total_amount, received=o.received, note=o.note)
             db.add(new_order)
             saved_count += 1
         db.commit()
@@ -145,8 +112,9 @@ def create_orders(orders: List[OrderData]):
         return {"status": "error", "message": str(e)}
     finally:
         db.close()
-    return {"status": "success", "message": f"成功寫入 {saved_count} 筆訂單至雲端資料庫！"}
+    return {"status": "success", "message": f"成功寫入 {saved_count} 筆訂單！"}
 
+# --- 戰情室 API ---
 @app.get("/api/orders")
 def get_orders():
     db = SessionLocal()
@@ -162,32 +130,23 @@ def get_today_stats():
     try:
         twenty_four_hours_ago = datetime.datetime.utcnow() - datetime.timedelta(hours=24)
         today_orders = db.query(Order).filter(Order.created_at >= twenty_four_hours_ago).all()
-        
-        total_orders_count = len(today_orders)
-        revenue_received = sum(o.total_amount for o in today_orders if o.received)
-        revenue_unpaid = sum(o.total_amount for o in today_orders if not o.received)
-
         return {
             "status": "success",
             "data": {
-                "total_orders_count": total_orders_count,
-                "revenue_received": revenue_received,
-                "revenue_unpaid": revenue_unpaid
+                "total_orders_count": len(today_orders),
+                "revenue_received": sum(o.total_amount for o in today_orders if o.received),
+                "revenue_unpaid": sum(o.total_amount for o in today_orders if not o.received)
             }
         }
     finally:
         db.close()
 
-# ==========================================
-# 📦 新增：進銷存專區 (老闆專屬) 📦
-# ==========================================
-
-# 1. 自動初始化倉庫 (一鍵將五大天王進貨建檔)
+# --- 進銷存與管理 API ---
 @app.get("/api/init_inventory")
 def init_inventory():
     db = SessionLocal()
     try:
-        # 大師先幫您設定一批初始的安全庫存與測試成本
+        # 這裡設定了您的五大天王
         initial_materials = [
             {"name": "雞蛋", "unit": "顆", "stock_qty": 300, "unit_cost": 5.0},
             {"name": "低筋麵粉", "unit": "克", "stock_qty": 10000, "unit_cost": 0.05}, 
@@ -195,15 +154,11 @@ def init_inventory():
             {"name": "油", "unit": "毫升", "stock_qty": 5000, "unit_cost": 0.1},
             {"name": "糖", "unit": "克", "stock_qty": 5000, "unit_cost": 0.04}
         ]
-        
         added_count = 0
         for mat in initial_materials:
-            existing = db.query(Material).filter(Material.name == mat["name"]).first()
-            if not existing:
-                new_mat = Material(**mat)
-                db.add(new_mat)
+            if not db.query(Material).filter(Material.name == mat["name"]).first():
+                db.add(Material(**mat))
                 added_count += 1
-        
         db.commit()
         return {"status": "success", "message": f"成功建檔 {added_count} 項核心原物料！"}
     except Exception as e:
@@ -212,12 +167,32 @@ def init_inventory():
     finally:
         db.close()
 
-# 2. 查詢倉庫目前庫存與單位成本
 @app.get("/api/inventory")
 def get_inventory():
     db = SessionLocal()
     try:
         materials = db.query(Material).all()
         return {"status": "success", "data": materials}
+    finally:
+        db.close()
+
+# 🌟 新增：老闆建檔新口味的專屬通道
+@app.post("/api/admin/products")
+def create_full_product(data: ProductCreate):
+    db = SessionLocal()
+    try:
+        new_prod = Product(name=data.name, price=data.price)
+        db.add(new_prod)
+        db.flush() 
+        
+        for r in data.recipes:
+            new_recipe = RecipeItem(product_id=new_prod.id, material_id=r.material_id, consume_qty=r.consume_qty)
+            db.add(new_recipe)
+        
+        db.commit()
+        return {"status": "success", "message": f"【{data.name}】口味與配方已成功建檔！"}
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": str(e)}
     finally:
         db.close()
