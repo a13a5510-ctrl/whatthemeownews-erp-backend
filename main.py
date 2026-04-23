@@ -9,7 +9,7 @@ import datetime
 import os
 
 # ==========================================
-# 1. 雲端資料庫連線設定 (PostgreSQL) - 已加入防斷線機制
+# 1. 雲端資料庫連線設定 (PostgreSQL)
 # ==========================================
 SQLALCHEMY_DATABASE_URL = os.getenv(
     "DATABASE_URL", 
@@ -78,11 +78,17 @@ class ProductCreate(BaseModel):
     price: int
     recipes: List[RecipeInput]
 
-# 🌟 新增：用來接收「新增材料」的格式
 class MaterialInput(BaseModel):
     name: str
     unit: str
     unit_cost: float
+
+# 🌟 新增：用來接收「修改庫存與成本」的格式
+class MaterialUpdate(BaseModel):
+    name: str
+    unit: str
+    unit_cost: float
+    stock_qty: float
 
 # ==========================================
 # 4. 初始化 FastAPI 伺服器與路由
@@ -179,7 +185,6 @@ def get_inventory():
     finally:
         db.close()
 
-# 🌟 新增：老闆在前端「快速新增材料」的 API
 @app.post("/api/materials")
 def create_material(mat: MaterialInput):
     db = SessionLocal()
@@ -192,6 +197,35 @@ def create_material(mat: MaterialInput):
         db.add(new_mat)
         db.commit()
         return {"status": "success", "message": f"成功新增材料：{mat.name}"}
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        db.close()
+
+# 🌟 新增：老闆專用的修改庫存與成本 API (PUT 方法)
+@app.put("/api/materials/{material_id}")
+def update_material(material_id: int, mat: MaterialUpdate):
+    db = SessionLocal()
+    try:
+        material = db.query(Material).filter(Material.id == material_id).first()
+        if not material:
+            return {"status": "error", "message": "找不到該項材料！"}
+
+        # 如果改了名字，檢查會不會跟別的材料撞名
+        if material.name != mat.name:
+            exist = db.query(Material).filter(Material.name == mat.name).first()
+            if exist:
+                return {"status": "error", "message": f"材料「{mat.name}」已經存在，不可重複！"}
+
+        # 更新資料
+        material.name = mat.name
+        material.unit = mat.unit
+        material.unit_cost = mat.unit_cost
+        material.stock_qty = mat.stock_qty
+        
+        db.commit()
+        return {"status": "success", "message": f"成功更新材料：{mat.name}"}
     except Exception as e:
         db.rollback()
         return {"status": "error", "message": str(e)}
