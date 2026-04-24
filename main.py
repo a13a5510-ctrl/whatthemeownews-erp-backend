@@ -9,7 +9,7 @@ import datetime
 import os
 
 # ==========================================
-# 1. 雲端資料庫連線設定 (PostgreSQL)
+# 1. 雲端資料庫連線設定
 # ==========================================
 SQLALCHEMY_DATABASE_URL = os.getenv(
     "DATABASE_URL", 
@@ -83,7 +83,6 @@ class MaterialInput(BaseModel):
     unit: str
     unit_cost: float
 
-# 🌟 新增：用來接收「修改庫存與成本」的格式
 class MaterialUpdate(BaseModel):
     name: str
     unit: str
@@ -104,8 +103,7 @@ app.add_middleware(
 )
 
 @app.get("/")
-def read_root():
-    return {"status": "success", "message": "喵逮雞 Cloud Run 伺服器運作中🚀"}
+def read_root(): return {"status": "success", "message": "喵逮雞 Cloud Run 伺服器運作中🚀"}
 
 # --- POS 結帳與戰情室 API ---
 @app.post("/api/orders")
@@ -131,8 +129,7 @@ def get_orders():
     try:
         orders = db.query(Order).order_by(Order.created_at.desc()).limit(100).all()
         return {"status": "success", "data": orders}
-    finally:
-        db.close()
+    finally: db.close()
 
 @app.get("/api/stats/today")
 def get_today_stats():
@@ -148,8 +145,7 @@ def get_today_stats():
                 "revenue_unpaid": sum(o.total_amount for o in today_orders if not o.received)
             }
         }
-    finally:
-        db.close()
+    finally: db.close()
 
 # --- 進銷存與管理 API ---
 @app.get("/api/init_inventory")
@@ -170,11 +166,8 @@ def init_inventory():
                 added_count += 1
         db.commit()
         return {"status": "success", "message": f"成功建檔 {added_count} 項核心原物料！"}
-    except Exception as e:
-        db.rollback()
-        return {"status": "error", "message": str(e)}
-    finally:
-        db.close()
+    except Exception as e: db.rollback(); return {"status": "error", "message": str(e)}
+    finally: db.close()
 
 @app.get("/api/inventory")
 def get_inventory():
@@ -182,60 +175,48 @@ def get_inventory():
     try:
         materials = db.query(Material).order_by(Material.id.desc()).all()
         return {"status": "success", "data": materials}
-    finally:
-        db.close()
+    finally: db.close()
 
 @app.post("/api/materials")
 def create_material(mat: MaterialInput):
     db = SessionLocal()
     try:
         exist = db.query(Material).filter(Material.name == mat.name).first()
-        if exist:
-            return {"status": "error", "message": f"材料「{mat.name}」已經存在囉！"}
-        
+        if exist: return {"status": "error", "message": f"材料「{mat.name}」已經存在囉！"}
         new_mat = Material(name=mat.name, unit=mat.unit, unit_cost=mat.unit_cost, stock_qty=0.0)
         db.add(new_mat)
         db.commit()
         return {"status": "success", "message": f"成功新增材料：{mat.name}"}
-    except Exception as e:
-        db.rollback()
-        return {"status": "error", "message": str(e)}
-    finally:
-        db.close()
+    except Exception as e: db.rollback(); return {"status": "error", "message": str(e)}
+    finally: db.close()
 
-# 🌟 新增：老闆專用的修改庫存與成本 API (PUT 方法)
 @app.put("/api/materials/{material_id}")
 def update_material(material_id: int, mat: MaterialUpdate):
     db = SessionLocal()
     try:
         material = db.query(Material).filter(Material.id == material_id).first()
-        if not material:
-            return {"status": "error", "message": "找不到該項材料！"}
-
-        # 如果改了名字，檢查會不會跟別的材料撞名
+        if not material: return {"status": "error", "message": "找不到該項材料！"}
         if material.name != mat.name:
-            exist = db.query(Material).filter(Material.name == mat.name).first()
-            if exist:
+            if db.query(Material).filter(Material.name == mat.name).first():
                 return {"status": "error", "message": f"材料「{mat.name}」已經存在，不可重複！"}
-
-        # 更新資料
         material.name = mat.name
         material.unit = mat.unit
         material.unit_cost = mat.unit_cost
         material.stock_qty = mat.stock_qty
-        
         db.commit()
         return {"status": "success", "message": f"成功更新材料：{mat.name}"}
-    except Exception as e:
-        db.rollback()
-        return {"status": "error", "message": str(e)}
-    finally:
-        db.close()
+    except Exception as e: db.rollback(); return {"status": "error", "message": str(e)}
+    finally: db.close()
 
+# 🌟 這裡負責接收老闆建立的產品
 @app.post("/api/admin/products")
 def create_full_product(data: ProductCreate):
     db = SessionLocal()
     try:
+        # 檢查是否撞名
+        if db.query(Product).filter(Product.name == data.name).first():
+            return {"status": "error", "message": f"品項「{data.name}」已經存在囉！"}
+
         new_prod = Product(name=data.name, price=data.price)
         db.add(new_prod)
         db.flush() 
@@ -244,8 +225,34 @@ def create_full_product(data: ProductCreate):
             db.add(new_recipe)
         db.commit()
         return {"status": "success", "message": f"【{data.name}】口味與配方已成功建檔！"}
-    except Exception as e:
-        db.rollback()
-        return {"status": "error", "message": str(e)}
+    except Exception as e: db.rollback(); return {"status": "error", "message": str(e)}
+    finally: db.close()
+
+# 🌟 全新 API：取得所有已建檔的品項與配方明細
+@app.get("/api/admin/products")
+def get_products():
+    db = SessionLocal()
+    try:
+        products = db.query(Product).order_by(Product.id.desc()).all()
+        result = []
+        for p in products:
+            recipes = db.query(RecipeItem).filter(RecipeItem.product_id == p.id).all()
+            total_cost = 0
+            details = []
+            for r in recipes:
+                mat = db.query(Material).filter(Material.id == r.material_id).first()
+                if mat:
+                    total_cost += (mat.unit_cost * r.consume_qty)
+                    details.append(f"{mat.name}({r.consume_qty}{mat.unit})")
+            
+            result.append({
+                "id": p.id,
+                "name": p.name,
+                "price": p.price,
+                "total_cost": round(total_cost, 2),
+                "gross_profit": round(p.price - total_cost, 2),
+                "recipe_summary": " + ".join(details)
+            })
+        return {"status": "success", "data": result}
     finally:
         db.close()
