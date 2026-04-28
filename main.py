@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, ForeignKey, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, ForeignKey, DateTime, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from pydantic import BaseModel
@@ -11,11 +11,7 @@ import os
 # ==========================================
 # 1. 雲端資料庫連線設定
 # ==========================================
-SQLALCHEMY_DATABASE_URL = os.getenv(
-    "DATABASE_URL", 
-    "sqlite:///./miao_erp.db"
-)
-
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./miao_erp.db")
 if SQLALCHEMY_DATABASE_URL.startswith("postgres://"):
     SQLALCHEMY_DATABASE_URL = SQLALCHEMY_DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -40,6 +36,7 @@ class Order(Base):
     order_no = Column(String)
     total_amount = Column(Integer, default=0)
     received = Column(Boolean, default=False)
+    items = Column(String, nullable=True)  # 🌟 新增：存放購買品項的欄位
     note = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
@@ -60,6 +57,13 @@ class RecipeItem(Base):
 
 Base.metadata.create_all(bind=engine)
 
+# 🌟 無痛升級資料庫：自動幫舊有的 orders 表格加上 items 欄位
+try:
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE orders ADD COLUMN items VARCHAR"))
+except Exception:
+    pass # 如果欄位已經存在就會安靜跳過
+
 # ==========================================
 # 3. 定義接收資料的格式 (Pydantic)
 # ==========================================
@@ -67,61 +71,37 @@ class OrderData(BaseModel):
     order_no: str
     total_amount: int
     received: bool
+    items: Optional[str] = ""  # 🌟 讓 API 能接收品項字串
     note: Optional[str] = ""
 
 class RecipeInput(BaseModel):
-    material_id: int
-    consume_qty: float
-
+    material_id: int; consume_qty: float
 class ProductCreate(BaseModel):
-    name: str
-    price: int
-    recipes: List[RecipeInput]
-
+    name: str; price: int; recipes: List[RecipeInput]
 class MaterialInput(BaseModel):
-    name: str
-    unit: str
-    unit_cost: float
-
+    name: str; unit: str; unit_cost: float
 class MaterialUpdate(BaseModel):
-    name: str
-    unit: str
-    unit_cost: float
-    stock_qty: float
+    name: str; unit: str; unit_cost: float; stock_qty: float
 
 # ==========================================
-# 4. 🌟 台灣時間 (UTC+8) 精準日曆轉換引擎
+# 4. 台灣時間 (UTC+8) 精準日曆轉換引擎
 # ==========================================
 def get_tw_time_ranges():
-    # 取得目前 UTC 時間並轉換為台灣時間
     tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
-    # 抓出台灣時間「今天 00:00:00」與「昨天 00:00:00」
     today_start_tw = tw_now.replace(hour=0, minute=0, second=0, microsecond=0)
     yesterday_start_tw = today_start_tw - datetime.timedelta(days=1)
     
-    # 將時間轉回 UTC 以便在資料庫進行查詢比對
     today_start_utc = today_start_tw - datetime.timedelta(hours=8)
     yesterday_start_utc = yesterday_start_tw - datetime.timedelta(hours=8)
     tomorrow_start_utc = today_start_utc + datetime.timedelta(days=1)
     
-    return {
-        "yesterday_start": yesterday_start_utc,
-        "today_start": today_start_utc,
-        "tomorrow_start": tomorrow_start_utc
-    }
+    return { "yesterday_start": yesterday_start_utc, "today_start": today_start_utc, "tomorrow_start": tomorrow_start_utc }
 
 # ==========================================
 # 5. 初始化 FastAPI 伺服器與路由
 # ==========================================
 app = FastAPI(title="喵逮雞 ERP API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], 
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 @app.get("/")
 def read_root(): return {"status": "success", "message": "喵逮雞 Cloud Run 伺服器運作中🚀"}
@@ -133,7 +113,8 @@ def create_orders(orders: List[OrderData]):
     saved_count = 0
     try:
         for o in orders:
-            new_order = Order(order_no=o.order_no, total_amount=o.total_amount, received=o.received, note=o.note)
+            # 🌟 寫入品項資料
+            new_order = Order(order_no=o.order_no, total_amount=o.total_amount, received=o.received, items=o.items, note=o.note)
             db.add(new_order)
             saved_count += 1
         db.commit()
@@ -149,7 +130,6 @@ def get_orders():
         return {"status": "success", "data": orders}
     finally: db.close()
 
-# 🌟 新增：取得「今天」的訂單明細
 @app.get("/api/orders/today")
 def get_today_orders():
     db = SessionLocal()
@@ -159,7 +139,6 @@ def get_today_orders():
         return {"status": "success", "data": orders}
     finally: db.close()
 
-# 🌟 新增：取得「昨天」的訂單明細
 @app.get("/api/orders/yesterday")
 def get_yesterday_orders():
     db = SessionLocal()
@@ -169,7 +148,6 @@ def get_yesterday_orders():
         return {"status": "success", "data": orders}
     finally: db.close()
 
-# 🌟 升級：今日營收統計 (精準日曆日)
 @app.get("/api/stats/today")
 def get_today_stats():
     db = SessionLocal()
@@ -178,15 +156,10 @@ def get_today_stats():
         today_orders = db.query(Order).filter(Order.created_at >= ranges["today_start"], Order.created_at < ranges["tomorrow_start"]).all()
         return {
             "status": "success",
-            "data": {
-                "total_orders_count": len(today_orders),
-                "revenue_received": sum(o.total_amount for o in today_orders if o.received),
-                "revenue_unpaid": sum(o.total_amount for o in today_orders if not o.received)
-            }
+            "data": { "total_orders_count": len(today_orders), "revenue_received": sum(o.total_amount for o in today_orders if o.received), "revenue_unpaid": sum(o.total_amount for o in today_orders if not o.received) }
         }
     finally: db.close()
 
-# 🌟 新增：昨日營收統計
 @app.get("/api/stats/yesterday")
 def get_yesterday_stats():
     db = SessionLocal()
@@ -195,46 +168,38 @@ def get_yesterday_stats():
         yesterday_orders = db.query(Order).filter(Order.created_at >= ranges["yesterday_start"], Order.created_at < ranges["today_start"]).all()
         return {
             "status": "success",
-            "data": {
-                "total_orders_count": len(yesterday_orders),
-                "revenue_received": sum(o.total_amount for o in yesterday_orders if o.received),
-                "revenue_unpaid": sum(o.total_amount for o in yesterday_orders if not o.received)
-            }
+            "data": { "total_orders_count": len(yesterday_orders), "revenue_received": sum(o.total_amount for o in yesterday_orders if o.received), "revenue_unpaid": sum(o.total_amount for o in yesterday_orders if not o.received) }
         }
     finally: db.close()
 
-# --- 以下保留原本的進銷存與品項管理 API ---
 @app.get("/api/init_inventory")
 def init_inventory():
     db = SessionLocal()
     try:
-        initial_materials = [{"name": "雞蛋", "unit": "顆", "stock_qty": 300, "unit_cost": 5.0}, {"name": "低筋麵粉", "unit": "克", "stock_qty": 10000, "unit_cost": 0.05}, {"name": "泡打粉", "unit": "克", "stock_qty": 1000, "unit_cost": 0.2}, {"name": "油", "unit": "毫升", "stock_qty": 5000, "unit_cost": 0.1}, {"name": "糖", "unit": "克", "stock_qty": 5000, "unit_cost": 0.04}]
+        initial = [{"name": "雞蛋", "unit": "顆", "stock_qty": 300, "unit_cost": 5.0}, {"name": "低筋麵粉", "unit": "克", "stock_qty": 10000, "unit_cost": 0.05}, {"name": "泡打粉", "unit": "克", "stock_qty": 1000, "unit_cost": 0.2}, {"name": "油", "unit": "毫升", "stock_qty": 5000, "unit_cost": 0.1}, {"name": "糖", "unit": "克", "stock_qty": 5000, "unit_cost": 0.04}]
         added_count = 0
-        for mat in initial_materials:
+        for mat in initial:
             if not db.query(Material).filter(Material.name == mat["name"]).first():
-                db.add(Material(**mat))
-                added_count += 1
+                db.add(Material(**mat)); added_count += 1
         db.commit()
-        return {"status": "success", "message": f"成功建檔 {added_count} 項！"}
-    except Exception as e: db.rollback(); return {"status": "error", "message": str(e)}
+        return {"status": "success"}
+    except Exception as e: db.rollback(); return {"status": "error"}
     finally: db.close()
 
 @app.get("/api/inventory")
 def get_inventory():
     db = SessionLocal()
-    try:
-        materials = db.query(Material).order_by(Material.id.desc()).all()
-        return {"status": "success", "data": materials}
+    try: return {"status": "success", "data": db.query(Material).order_by(Material.id.desc()).all()}
     finally: db.close()
 
 @app.post("/api/materials")
 def create_material(mat: MaterialInput):
     db = SessionLocal()
     try:
-        if db.query(Material).filter(Material.name == mat.name).first(): return {"status": "error", "message": f"材料已存在！"}
+        if db.query(Material).filter(Material.name == mat.name).first(): return {"status": "error"}
         db.add(Material(name=mat.name, unit=mat.unit, unit_cost=mat.unit_cost, stock_qty=0.0))
         db.commit()
-        return {"status": "success", "message": f"成功新增材料！"}
+        return {"status": "success"}
     except Exception as e: db.rollback(); return {"status": "error"}
     finally: db.close()
 
@@ -242,9 +207,9 @@ def create_material(mat: MaterialInput):
 def update_material(material_id: int, mat: MaterialUpdate):
     db = SessionLocal()
     try:
-        material = db.query(Material).filter(Material.id == material_id).first()
-        if not material: return {"status": "error"}
-        material.name = mat.name; material.unit = mat.unit; material.unit_cost = mat.unit_cost; material.stock_qty = mat.stock_qty
+        m = db.query(Material).filter(Material.id == material_id).first()
+        if not m: return {"status": "error"}
+        m.name = mat.name; m.unit = mat.unit; m.unit_cost = mat.unit_cost; m.stock_qty = mat.stock_qty
         db.commit()
         return {"status": "success"}
     except Exception as e: db.rollback(); return {"status": "error"}
@@ -256,11 +221,10 @@ def create_full_product(data: ProductCreate):
     try:
         if db.query(Product).filter(Product.name == data.name).first(): return {"status": "error"}
         new_prod = Product(name=data.name, price=data.price)
-        db.add(new_prod)
-        db.flush() 
+        db.add(new_prod); db.flush() 
         for r in data.recipes: db.add(RecipeItem(product_id=new_prod.id, material_id=r.material_id, consume_qty=r.consume_qty))
         db.commit()
-        return {"status": "success", "message": f"建檔成功！"}
+        return {"status": "success"}
     except Exception as e: db.rollback(); return {"status": "error"}
     finally: db.close()
 
@@ -274,7 +238,7 @@ def update_full_product(product_id: int, data: ProductCreate):
         db.query(RecipeItem).filter(RecipeItem.product_id == prod.id).delete()
         for r in data.recipes: db.add(RecipeItem(product_id=prod.id, material_id=r.material_id, consume_qty=r.consume_qty))
         db.commit()
-        return {"status": "success", "message": f"修改成功！"}
+        return {"status": "success"}
     except Exception as e: db.rollback(); return {"status": "error"}
     finally: db.close()
 
@@ -286,16 +250,7 @@ def get_products():
         result = []
         for p in products:
             recipes = db.query(RecipeItem).filter(RecipeItem.product_id == p.id).all()
-            total_cost = 0; details = []; raw_recipes = []
-            for r in recipes:
-                mat = db.query(Material).filter(Material.id == r.material_id).first()
-                if mat:
-                    total_cost += (mat.unit_cost * r.consume_qty)
-                    details.append(f"{mat.name}({r.consume_qty}{mat.unit})")
-                    raw_recipes.append({"material_id": mat.id, "consume_qty": r.consume_qty})
-            result.append({
-                "id": p.id, "name": p.name, "price": p.price, "total_cost": round(total_cost, 2), 
-                "gross_profit": round(p.price - total_cost, 2), "recipe_summary": " + ".join(details), "recipes": raw_recipes
-            })
+            total_cost = sum([db.query(Material).filter(Material.id == r.material_id).first().unit_cost * r.consume_qty for r in recipes if db.query(Material).filter(Material.id == r.material_id).first()])
+            result.append({ "id": p.id, "name": p.name, "price": p.price, "total_cost": round(total_cost, 2), "gross_profit": round(p.price - total_cost, 2) })
         return {"status": "success", "data": result}
     finally: db.close()
