@@ -2,3 +2,4 @@ fastapi
 uvicorn
 sqlalchemy
 psycopg2-binary
+google-generativeai==0.4.1
