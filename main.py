@@ -164,7 +164,7 @@ def parse_voice_order(req: VoiceOrderRequest):
         """
 
         # 🌟 直接使用 Python 原生網路套件呼叫 Google 官方 API，無視所有套件問題！
-        url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=){gemini_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
         headers = {'Content-Type': 'application/json'}
         data = {
             "contents": [{"parts": [{"text": prompt}]}]
