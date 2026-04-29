@@ -8,7 +8,7 @@ from typing import List, Optional
 import datetime
 import os
 import json
-import google.generativeai as genai # 🌟 新增：引入 AI 套件
+import google.generativeai as genai 
 
 # ==========================================
 # 1. 雲端資料庫與 AI 連線設定
@@ -21,8 +21,7 @@ engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True, pool_recycle
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# 🌟 設定 Gemini API 金鑰 (需在 Cloud Run 環境變數設定 GEMINI_API_KEY)
-# 如果沒有設定，預設會印出警告但不讓程式崩潰
+# 設定 Gemini AI 金鑰
 gemini_key = os.getenv("GEMINI_API_KEY", "")
 if gemini_key:
     genai.configure(api_key=gemini_key)
@@ -64,6 +63,8 @@ class RecipeItem(Base):
     consume_qty = Column(Float)                      
 
 Base.metadata.create_all(bind=engine)
+
+# 無痛擴建 items 欄位
 try:
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE orders ADD COLUMN items VARCHAR"))
@@ -78,19 +79,21 @@ class OrderData(BaseModel):
 
 class RecipeInput(BaseModel):
     material_id: int; consume_qty: float
+
 class ProductCreate(BaseModel):
     name: str; price: int; recipes: List[RecipeInput]
+
 class MaterialInput(BaseModel):
     name: str; unit: str; unit_cost: float
+
 class MaterialUpdate(BaseModel):
     name: str; unit: str; unit_cost: float; stock_qty: float
 
-# 🌟 新增：語音解析請求格式
 class VoiceOrderRequest(BaseModel):
     transcript: str
 
 # ==========================================
-# 4. 台灣時間引擎
+# 4. 台灣時間轉換引擎
 # ==========================================
 def get_tw_time_ranges():
     tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
@@ -109,9 +112,35 @@ app = FastAPI(title="喵逮雞 ERP API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 @app.get("/")
-def read_root(): return {"status": "success", "message": "喵逮雞 Cloud Run 伺服器運作中🚀"}
+def read_root(): 
+    return {"status": "success", "message": "喵逮雞 Cloud Run 伺服器運作中🚀"}
 
-# --- 🌟 終極黑科技：AI 語音解析引擎 ---
+# --- 🌟 初始化庫存與菜單 API ---
+@app.get("/api/init_inventory")
+def init_inventory():
+    db = SessionLocal()
+    try:
+        initial = [
+            {"name": "雞蛋", "unit": "顆", "stock_qty": 300, "unit_cost": 5.0}, 
+            {"name": "低筋麵粉", "unit": "克", "stock_qty": 10000, "unit_cost": 0.05}, 
+            {"name": "泡打粉", "unit": "克", "stock_qty": 1000, "unit_cost": 0.2}, 
+            {"name": "油", "unit": "毫升", "stock_qty": 5000, "unit_cost": 0.1}, 
+            {"name": "糖", "unit": "克", "stock_qty": 5000, "unit_cost": 0.04}
+        ]
+        added_count = 0
+        for mat in initial:
+            if not db.query(Material).filter(Material.name == mat["name"]).first():
+                db.add(Material(**mat))
+                added_count += 1
+        db.commit()
+        return {"status": "success", "message": f"成功建檔 {added_count} 項！"}
+    except Exception as e: 
+        db.rollback()
+        return {"status": "error", "message": str(e)}
+    finally: 
+        db.close()
+
+# --- 🌟 AI 語音解析引擎 API ---
 @app.post("/api/ai/parse-order")
 def parse_voice_order(req: VoiceOrderRequest):
     if not gemini_key:
@@ -119,11 +148,9 @@ def parse_voice_order(req: VoiceOrderRequest):
     
     db = SessionLocal()
     try:
-        # 1. 抓出現有菜單
         products = db.query(Product).all()
         product_names = [p.name for p in products]
 
-        # 2. 構建完美 Prompt
         prompt = f"""
         你是一個頂級的 POS 系統點餐解析器。
         目前店裡的菜單有：{product_names}
@@ -132,17 +159,15 @@ def parse_voice_order(req: VoiceOrderRequest):
         規則：
         1. 聰明地忽略錯別字與冗言贅字（例如：把「原位」、「圓味」當作「原味」，把「找媒」、「炒梅」當作「草莓」）。
         2. 將數量轉換為阿拉伯數字（例如：兩個、兩格=2，三盒=3）。
-        3. 【極度重要】請「只」輸出 JSON 格式的字串，絕對不要包含 Markdown 語法（不要有 ```json ）、也不要有任何其他說明文字。
+        3. 【極度重要】請「只」輸出 JSON 格式的字串，絕對不要包含 Markdown 語法（不要有 ```json ），也不要有任何其他說明文字。
         4. 如果聽不懂或沒有任何符合的品項，請回傳空字典 {{}}。
         
         客人語音：「{req.transcript}」
         """
 
-        # 3. 呼叫 Gemini AI
         model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
         
-        # 4. 解析回傳的 JSON
         res_text = response.text.replace("```json", "").replace("```", "").strip()
         parsed_json = json.loads(res_text)
         
@@ -155,98 +180,154 @@ def parse_voice_order(req: VoiceOrderRequest):
     finally:
         db.close()
 
-# --- POS 結帳與統計 ---
+# --- POS 結帳與統計 API ---
 @app.post("/api/orders")
 def create_orders(orders: List[OrderData]):
     db = SessionLocal()
     try:
-        for o in orders: db.add(Order(order_no=o.order_no, total_amount=o.total_amount, received=o.received, items=o.items, note=o.note))
+        for o in orders: 
+            db.add(Order(order_no=o.order_no, total_amount=o.total_amount, received=o.received, items=o.items, note=o.note))
         db.commit()
         return {"status": "success"}
-    except Exception as e: db.rollback(); return {"status": "error"}
-    finally: db.close()
+    except Exception as e: 
+        db.rollback()
+        return {"status": "error"}
+    finally: 
+        db.close()
 
 @app.get("/api/orders")
 def get_orders():
     db = SessionLocal()
-    try: return {"status": "success", "data": db.query(Order).order_by(Order.created_at.desc()).limit(100).all()}
-    finally: db.close()
+    try: 
+        return {"status": "success", "data": db.query(Order).order_by(Order.created_at.desc()).limit(100).all()}
+    finally: 
+        db.close()
 
 @app.get("/api/orders/today")
 def get_today_orders():
-    db = SessionLocal(); ranges = get_tw_time_ranges()
-    try: return {"status": "success", "data": db.query(Order).filter(Order.created_at >= ranges["today_start"], Order.created_at < ranges["tomorrow_start"]).order_by(Order.created_at.desc()).all()}
-    finally: db.close()
+    db = SessionLocal()
+    ranges = get_tw_time_ranges()
+    try: 
+        return {"status": "success", "data": db.query(Order).filter(Order.created_at >= ranges["today_start"], Order.created_at < ranges["tomorrow_start"]).order_by(Order.created_at.desc()).all()}
+    finally: 
+        db.close()
 
 @app.get("/api/orders/yesterday")
 def get_yesterday_orders():
-    db = SessionLocal(); ranges = get_tw_time_ranges()
-    try: return {"status": "success", "data": db.query(Order).filter(Order.created_at >= ranges["yesterday_start"], Order.created_at < ranges["today_start"]).order_by(Order.created_at.desc()).all()}
-    finally: db.close()
+    db = SessionLocal()
+    ranges = get_tw_time_ranges()
+    try: 
+        return {"status": "success", "data": db.query(Order).filter(Order.created_at >= ranges["yesterday_start"], Order.created_at < ranges["today_start"]).order_by(Order.created_at.desc()).all()}
+    finally: 
+        db.close()
 
 @app.get("/api/stats/today")
 def get_today_stats():
-    db = SessionLocal(); ranges = get_tw_time_ranges()
+    db = SessionLocal()
+    ranges = get_tw_time_ranges()
     try:
         ords = db.query(Order).filter(Order.created_at >= ranges["today_start"], Order.created_at < ranges["tomorrow_start"]).all()
-        return {"status": "success", "data": { "total_orders_count": len(ords), "revenue_received": sum(o.total_amount for o in ords if o.received), "revenue_unpaid": sum(o.total_amount for o in ords if not o.received) }}
-    finally: db.close()
+        return {
+            "status": "success", 
+            "data": { 
+                "total_orders_count": len(ords), 
+                "revenue_received": sum(o.total_amount for o in ords if o.received), 
+                "revenue_unpaid": sum(o.total_amount for o in ords if not o.received) 
+            }
+        }
+    finally: 
+        db.close()
 
 @app.get("/api/stats/yesterday")
 def get_yesterday_stats():
-    db = SessionLocal(); ranges = get_tw_time_ranges()
+    db = SessionLocal()
+    ranges = get_tw_time_ranges()
     try:
         ords = db.query(Order).filter(Order.created_at >= ranges["yesterday_start"], Order.created_at < ranges["today_start"]).all()
-        return {"status": "success", "data": { "total_orders_count": len(ords), "revenue_received": sum(o.total_amount for o in ords if o.received), "revenue_unpaid": sum(o.total_amount for o in ords if not o.received) }}
-    finally: db.close()
+        return {
+            "status": "success", 
+            "data": { 
+                "total_orders_count": len(ords), 
+                "revenue_received": sum(o.total_amount for o in ords if o.received), 
+                "revenue_unpaid": sum(o.total_amount for o in ords if not o.received) 
+            }
+        }
+    finally: 
+        db.close()
 
-# --- 進銷存與品項管理 ---
+# --- 進銷存與品項管理 API ---
 @app.get("/api/inventory")
 def get_inventory():
     db = SessionLocal()
-    try: return {"status": "success", "data": db.query(Material).order_by(Material.id.desc()).all()}
-    finally: db.close()
+    try: 
+        return {"status": "success", "data": db.query(Material).order_by(Material.id.desc()).all()}
+    finally: 
+        db.close()
 
 @app.post("/api/materials")
 def create_material(mat: MaterialInput):
     db = SessionLocal()
     try:
         db.add(Material(name=mat.name, unit=mat.unit, unit_cost=mat.unit_cost, stock_qty=0.0))
-        db.commit(); return {"status": "success"}
-    except Exception as e: db.rollback(); return {"status": "error"}
-    finally: db.close()
+        db.commit()
+        return {"status": "success"}
+    except Exception as e: 
+        db.rollback()
+        return {"status": "error"}
+    finally: 
+        db.close()
 
 @app.put("/api/materials/{material_id}")
 def update_material(material_id: int, mat: MaterialUpdate):
     db = SessionLocal()
     try:
         m = db.query(Material).filter(Material.id == material_id).first()
-        m.name = mat.name; m.unit = mat.unit; m.unit_cost = mat.unit_cost; m.stock_qty = mat.stock_qty
-        db.commit(); return {"status": "success"}
-    except Exception as e: db.rollback(); return {"status": "error"}
-    finally: db.close()
+        m.name = mat.name
+        m.unit = mat.unit
+        m.unit_cost = mat.unit_cost
+        m.stock_qty = mat.stock_qty
+        db.commit()
+        return {"status": "success"}
+    except Exception as e: 
+        db.rollback()
+        return {"status": "error"}
+    finally: 
+        db.close()
 
 @app.post("/api/admin/products")
 def create_full_product(data: ProductCreate):
     db = SessionLocal()
     try:
-        new_prod = Product(name=data.name, price=data.price); db.add(new_prod); db.flush() 
-        for r in data.recipes: db.add(RecipeItem(product_id=new_prod.id, material_id=r.material_id, consume_qty=r.consume_qty))
-        db.commit(); return {"status": "success"}
-    except Exception as e: db.rollback(); return {"status": "error"}
-    finally: db.close()
+        new_prod = Product(name=data.name, price=data.price)
+        db.add(new_prod)
+        db.flush() 
+        for r in data.recipes: 
+            db.add(RecipeItem(product_id=new_prod.id, material_id=r.material_id, consume_qty=r.consume_qty))
+        db.commit()
+        return {"status": "success"}
+    except Exception as e: 
+        db.rollback()
+        return {"status": "error"}
+    finally: 
+        db.close()
 
 @app.put("/api/admin/products/{product_id}")
 def update_full_product(product_id: int, data: ProductCreate):
     db = SessionLocal()
     try:
         prod = db.query(Product).filter(Product.id == product_id).first()
-        prod.name = data.name; prod.price = data.price
+        prod.name = data.name
+        prod.price = data.price
         db.query(RecipeItem).filter(RecipeItem.product_id == prod.id).delete()
-        for r in data.recipes: db.add(RecipeItem(product_id=prod.id, material_id=r.material_id, consume_qty=r.consume_qty))
-        db.commit(); return {"status": "success"}
-    except Exception as e: db.rollback(); return {"status": "error"}
-    finally: db.close()
+        for r in data.recipes: 
+            db.add(RecipeItem(product_id=prod.id, material_id=r.material_id, consume_qty=r.consume_qty))
+        db.commit()
+        return {"status": "success"}
+    except Exception as e: 
+        db.rollback()
+        return {"status": "error"}
+    finally: 
+        db.close()
 
 @app.get("/api/admin/products")
 def get_products():
@@ -257,6 +338,13 @@ def get_products():
         for p in products:
             recipes = db.query(RecipeItem).filter(RecipeItem.product_id == p.id).all()
             total_cost = sum([db.query(Material).filter(Material.id == r.material_id).first().unit_cost * r.consume_qty for r in recipes if db.query(Material).filter(Material.id == r.material_id).first()])
-            result.append({ "id": p.id, "name": p.name, "price": p.price, "total_cost": round(total_cost, 2), "gross_profit": round(p.price - total_cost, 2) })
+            result.append({ 
+                "id": p.id, 
+                "name": p.name, 
+                "price": p.price, 
+                "total_cost": round(total_cost, 2), 
+                "gross_profit": round(p.price - total_cost, 2) 
+            })
         return {"status": "success", "data": result}
-    finally: db.close()
+    finally: 
+        db.close()
