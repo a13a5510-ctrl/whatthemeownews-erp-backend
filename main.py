@@ -165,7 +165,7 @@ def parse_voice_order(req: VoiceOrderRequest):
         客人語音：「{req.transcript}」
         """
 
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
         
         res_text = response.text.replace("```json", "").replace("```", "").strip()
