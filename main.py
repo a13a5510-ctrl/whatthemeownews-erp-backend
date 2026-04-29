@@ -348,3 +348,4 @@ def get_products():
         return {"status": "success", "data": result}
     finally: 
         db.close()
+# 強制觸發 Cloud Run 更新 AI 通道
