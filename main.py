@@ -8,7 +8,8 @@ from typing import List, Optional
 import datetime
 import os
 import json
-import google.generativeai as genai 
+import urllib.request # 🌟 新增：Python 原生網路通訊套件
+import urllib.error   # 🌟 新增：錯誤處理
 
 # ==========================================
 # 1. 雲端資料庫與 AI 連線設定
@@ -21,10 +22,8 @@ engine = create_engine(SQLALCHEMY_DATABASE_URL, pool_pre_ping=True, pool_recycle
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# 設定 Gemini AI 金鑰
+# 取得 Gemini 金鑰
 gemini_key = os.getenv("GEMINI_API_KEY", "")
-if gemini_key:
-    genai.configure(api_key=gemini_key)
 
 # ==========================================
 # 2. 定義資料表 Schema
@@ -115,7 +114,6 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 def read_root(): 
     return {"status": "success", "message": "喵逮雞 Cloud Run 伺服器運作中🚀"}
 
-# --- 🌟 初始化庫存與菜單 API ---
 @app.get("/api/init_inventory")
 def init_inventory():
     db = SessionLocal()
@@ -140,7 +138,7 @@ def init_inventory():
     finally: 
         db.close()
 
-# --- 🌟 AI 語音解析引擎 API ---
+# --- 🌟 終極殺招：原生 API 直連語音解析引擎 ---
 @app.post("/api/ai/parse-order")
 def parse_voice_order(req: VoiceOrderRequest):
     if not gemini_key:
@@ -165,16 +163,30 @@ def parse_voice_order(req: VoiceOrderRequest):
         客人語音：「{req.transcript}」
         """
 
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
-        
-        res_text = response.text.replace("```json", "").replace("```", "").strip()
-        parsed_json = json.loads(res_text)
-        
+        # 🌟 直接使用 Python 原生網路套件呼叫 Google 官方 API，無視所有套件問題！
+        url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=){gemini_key}"
+        headers = {'Content-Type': 'application/json'}
+        data = {
+            "contents": [{"parts": [{"text": prompt}]}]
+        }
+
+        request = urllib.request.Request(url, data=json.dumps(data).encode('utf-8'), headers=headers, method='POST')
+
+        with urllib.request.urlopen(request) as response:
+            result = json.loads(response.read().decode('utf-8'))
+            res_text = result['candidates'][0]['content']['parts'][0]['text']
+
+            # 清理 JSON 格式
+            res_text = res_text.replace("```json", "").replace("```", "").strip()
+            parsed_json = json.loads(res_text)
+
         return {"status": "success", "data": parsed_json}
 
+    except urllib.error.HTTPError as e:
+        error_info = e.read().decode('utf-8')
+        return {"status": "error", "message": f"AI 通訊失敗: {error_info}"}
     except json.JSONDecodeError:
-        return {"status": "error", "message": f"AI 回傳格式錯誤: {response.text}"}
+        return {"status": "error", "message": f"AI 回傳格式錯誤: {res_text}"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
     finally:
@@ -348,4 +360,3 @@ def get_products():
         return {"status": "success", "data": result}
     finally: 
         db.close()
-# 強制觸發 Cloud Run 更新 AI 通道
