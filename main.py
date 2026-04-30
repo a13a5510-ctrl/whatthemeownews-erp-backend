@@ -164,8 +164,8 @@ def parse_voice_order(req: VoiceOrderRequest):
         """
 
         # 🌟 直接使用 Python 原生網路套件呼叫 Google 官方 API，無視所有套件問題！
-        # ✨ 最新 2026 年 Google 強制標配的 Gemini 3 閃電版：
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash:generateContent?key={gemini_key}"
+        # ✨ 正確的最新主力閃電版：
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
         headers = {'Content-Type': 'application/json'}
         data = {
             "contents": [{"parts": [{"text": prompt}]}]
