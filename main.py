@@ -1,15 +1,15 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, ForeignKey, DateTime, text
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
 from typing import List, Optional
 import datetime
 import os
 import json
-import urllib.request # 🌟 新增：Python 原生網路通訊套件
-import urllib.error   # 🌟 新增：錯誤處理
+import urllib.request 
+import urllib.error   
 
 # ==========================================
 # 1. 雲端資料庫與 AI 連線設定
@@ -24,6 +24,17 @@ Base = declarative_base()
 
 # 取得 Gemini 金鑰
 gemini_key = os.getenv("GEMINI_API_KEY", "")
+
+# ==========================================
+# 🌟 大師優化：依賴注入 (Dependency Injection)
+# 自動管理 Session，避免 Memory Leak 與重複的 try-finally
+# ==========================================
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 # ==========================================
 # 2. 定義資料表 Schema
@@ -115,8 +126,7 @@ def read_root():
     return {"status": "success", "message": "喵逮雞 Cloud Run 伺服器運作中🚀"}
 
 @app.get("/api/init_inventory")
-def init_inventory():
-    db = SessionLocal()
+def init_inventory(db: Session = Depends(get_db)):
     try:
         initial = [
             {"name": "雞蛋", "unit": "顆", "stock_qty": 300, "unit_cost": 5.0}, 
@@ -135,16 +145,13 @@ def init_inventory():
     except Exception as e: 
         db.rollback()
         return {"status": "error", "message": str(e)}
-    finally: 
-        db.close()
 
 # --- 🌟 終極殺招：原生 API 直連語音解析引擎 ---
 @app.post("/api/ai/parse-order")
-def parse_voice_order(req: VoiceOrderRequest):
+def parse_voice_order(req: VoiceOrderRequest, db: Session = Depends(get_db)):
     if not gemini_key:
         return {"status": "error", "message": "伺服器尚未設定 GEMINI_API_KEY"}
     
-    db = SessionLocal()
     try:
         products = db.query(Product).all()
         product_names = [p.name for p in products]
@@ -168,10 +175,7 @@ def parse_voice_order(req: VoiceOrderRequest):
         {{"原味": 2, "金沙": 1, "is_paid": true, "note": "取餐"}}
         """
 
-        # 🌟 直接使用 Python 原生網路套件呼叫 Google 官方 API，無視所有套件問題！
-        # ✨ 正確的最新主力閃電版：
-        # 👉 強制喚醒 Cloud Build 更新 2.5 版模型
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+        url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=){gemini_key}"
         headers = {'Content-Type': 'application/json'}
         data = {
             "contents": [{"parts": [{"text": prompt}]}]
@@ -183,7 +187,6 @@ def parse_voice_order(req: VoiceOrderRequest):
             result = json.loads(response.read().decode('utf-8'))
             res_text = result['candidates'][0]['content']['parts'][0]['text']
 
-            # 清理 JSON 格式
             res_text = res_text.replace("```json", "").replace("```", "").strip()
             parsed_json = json.loads(res_text)
 
@@ -196,13 +199,10 @@ def parse_voice_order(req: VoiceOrderRequest):
         return {"status": "error", "message": f"AI 回傳格式錯誤: {res_text}"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-    finally:
-        db.close()
 
 # --- POS 結帳與統計 API ---
 @app.post("/api/orders")
-def create_orders(orders: List[OrderData]):
-    db = SessionLocal()
+def create_orders(orders: List[OrderData], db: Session = Depends(get_db)):
     try:
         for o in orders: 
             db.add(Order(order_no=o.order_no, total_amount=o.total_amount, received=o.received, items=o.items, note=o.note))
@@ -211,81 +211,54 @@ def create_orders(orders: List[OrderData]):
     except Exception as e: 
         db.rollback()
         return {"status": "error"}
-    finally: 
-        db.close()
 
 @app.get("/api/orders")
-def get_orders():
-    db = SessionLocal()
-    try: 
-        return {"status": "success", "data": db.query(Order).order_by(Order.created_at.desc()).limit(100).all()}
-    finally: 
-        db.close()
+def get_orders(db: Session = Depends(get_db)):
+    return {"status": "success", "data": db.query(Order).order_by(Order.created_at.desc()).limit(100).all()}
 
 @app.get("/api/orders/today")
-def get_today_orders():
-    db = SessionLocal()
+def get_today_orders(db: Session = Depends(get_db)):
     ranges = get_tw_time_ranges()
-    try: 
-        return {"status": "success", "data": db.query(Order).filter(Order.created_at >= ranges["today_start"], Order.created_at < ranges["tomorrow_start"]).order_by(Order.created_at.desc()).all()}
-    finally: 
-        db.close()
+    return {"status": "success", "data": db.query(Order).filter(Order.created_at >= ranges["today_start"], Order.created_at < ranges["tomorrow_start"]).order_by(Order.created_at.desc()).all()}
 
 @app.get("/api/orders/yesterday")
-def get_yesterday_orders():
-    db = SessionLocal()
+def get_yesterday_orders(db: Session = Depends(get_db)):
     ranges = get_tw_time_ranges()
-    try: 
-        return {"status": "success", "data": db.query(Order).filter(Order.created_at >= ranges["yesterday_start"], Order.created_at < ranges["today_start"]).order_by(Order.created_at.desc()).all()}
-    finally: 
-        db.close()
+    return {"status": "success", "data": db.query(Order).filter(Order.created_at >= ranges["yesterday_start"], Order.created_at < ranges["today_start"]).order_by(Order.created_at.desc()).all()}
 
 @app.get("/api/stats/today")
-def get_today_stats():
-    db = SessionLocal()
+def get_today_stats(db: Session = Depends(get_db)):
     ranges = get_tw_time_ranges()
-    try:
-        ords = db.query(Order).filter(Order.created_at >= ranges["today_start"], Order.created_at < ranges["tomorrow_start"]).all()
-        return {
-            "status": "success", 
-            "data": { 
-                "total_orders_count": len(ords), 
-                "revenue_received": sum(o.total_amount for o in ords if o.received), 
-                "revenue_unpaid": sum(o.total_amount for o in ords if not o.received) 
-            }
+    ords = db.query(Order).filter(Order.created_at >= ranges["today_start"], Order.created_at < ranges["tomorrow_start"]).all()
+    return {
+        "status": "success", 
+        "data": { 
+            "total_orders_count": len(ords), 
+            "revenue_received": sum(o.total_amount for o in ords if o.received), 
+            "revenue_unpaid": sum(o.total_amount for o in ords if not o.received) 
         }
-    finally: 
-        db.close()
+    }
 
 @app.get("/api/stats/yesterday")
-def get_yesterday_stats():
-    db = SessionLocal()
+def get_yesterday_stats(db: Session = Depends(get_db)):
     ranges = get_tw_time_ranges()
-    try:
-        ords = db.query(Order).filter(Order.created_at >= ranges["yesterday_start"], Order.created_at < ranges["today_start"]).all()
-        return {
-            "status": "success", 
-            "data": { 
-                "total_orders_count": len(ords), 
-                "revenue_received": sum(o.total_amount for o in ords if o.received), 
-                "revenue_unpaid": sum(o.total_amount for o in ords if not o.received) 
-            }
+    ords = db.query(Order).filter(Order.created_at >= ranges["yesterday_start"], Order.created_at < ranges["today_start"]).all()
+    return {
+        "status": "success", 
+        "data": { 
+            "total_orders_count": len(ords), 
+            "revenue_received": sum(o.total_amount for o in ords if o.received), 
+            "revenue_unpaid": sum(o.total_amount for o in ords if not o.received) 
         }
-    finally: 
-        db.close()
+    }
 
 # --- 進銷存與品項管理 API ---
 @app.get("/api/inventory")
-def get_inventory():
-    db = SessionLocal()
-    try: 
-        return {"status": "success", "data": db.query(Material).order_by(Material.id.desc()).all()}
-    finally: 
-        db.close()
+def get_inventory(db: Session = Depends(get_db)):
+    return {"status": "success", "data": db.query(Material).order_by(Material.id.desc()).all()}
 
 @app.post("/api/materials")
-def create_material(mat: MaterialInput):
-    db = SessionLocal()
+def create_material(mat: MaterialInput, db: Session = Depends(get_db)):
     try:
         db.add(Material(name=mat.name, unit=mat.unit, unit_cost=mat.unit_cost, stock_qty=0.0))
         db.commit()
@@ -293,12 +266,9 @@ def create_material(mat: MaterialInput):
     except Exception as e: 
         db.rollback()
         return {"status": "error"}
-    finally: 
-        db.close()
 
 @app.put("/api/materials/{material_id}")
-def update_material(material_id: int, mat: MaterialUpdate):
-    db = SessionLocal()
+def update_material(material_id: int, mat: MaterialUpdate, db: Session = Depends(get_db)):
     try:
         m = db.query(Material).filter(Material.id == material_id).first()
         m.name = mat.name
@@ -310,12 +280,9 @@ def update_material(material_id: int, mat: MaterialUpdate):
     except Exception as e: 
         db.rollback()
         return {"status": "error"}
-    finally: 
-        db.close()
 
 @app.post("/api/admin/products")
-def create_full_product(data: ProductCreate):
-    db = SessionLocal()
+def create_full_product(data: ProductCreate, db: Session = Depends(get_db)):
     try:
         new_prod = Product(name=data.name, price=data.price)
         db.add(new_prod)
@@ -327,12 +294,9 @@ def create_full_product(data: ProductCreate):
     except Exception as e: 
         db.rollback()
         return {"status": "error"}
-    finally: 
-        db.close()
 
 @app.put("/api/admin/products/{product_id}")
-def update_full_product(product_id: int, data: ProductCreate):
-    db = SessionLocal()
+def update_full_product(product_id: int, data: ProductCreate, db: Session = Depends(get_db)):
     try:
         prod = db.query(Product).filter(Product.id == product_id).first()
         prod.name = data.name
@@ -345,25 +309,19 @@ def update_full_product(product_id: int, data: ProductCreate):
     except Exception as e: 
         db.rollback()
         return {"status": "error"}
-    finally: 
-        db.close()
 
 @app.get("/api/admin/products")
-def get_products():
-    db = SessionLocal()
-    try:
-        products = db.query(Product).order_by(Product.id.desc()).all()
-        result = []
-        for p in products:
-            recipes = db.query(RecipeItem).filter(RecipeItem.product_id == p.id).all()
-            total_cost = sum([db.query(Material).filter(Material.id == r.material_id).first().unit_cost * r.consume_qty for r in recipes if db.query(Material).filter(Material.id == r.material_id).first()])
-            result.append({ 
-                "id": p.id, 
-                "name": p.name, 
-                "price": p.price, 
-                "total_cost": round(total_cost, 2), 
-                "gross_profit": round(p.price - total_cost, 2) 
-            })
-        return {"status": "success", "data": result}
-    finally: 
-        db.close()
+def get_products(db: Session = Depends(get_db)):
+    products = db.query(Product).order_by(Product.id.desc()).all()
+    result = []
+    for p in products:
+        recipes = db.query(RecipeItem).filter(RecipeItem.product_id == p.id).all()
+        total_cost = sum([db.query(Material).filter(Material.id == r.material_id).first().unit_cost * r.consume_qty for r in recipes if db.query(Material).filter(Material.id == r.material_id).first()])
+        result.append({ 
+            "id": p.id, 
+            "name": p.name, 
+            "price": p.price, 
+            "total_cost": round(total_cost, 2), 
+            "gross_profit": round(p.price - total_cost, 2) 
+        })
+    return {"status": "success", "data": result}
