@@ -175,7 +175,8 @@ def parse_voice_order(req: VoiceOrderRequest, db: Session = Depends(get_db)):
         {{"原味": 2, "金沙": 1, "is_paid": true, "note": "取餐"}}
         """
 
-        url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=){gemini_key}"
+        # ✅ 返璞歸真版：乾淨純粹的字串
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
         headers = {'Content-Type': 'application/json'}
         data = {
             "contents": [{"parts": [{"text": prompt}]}]
