@@ -157,29 +157,30 @@ def parse_voice_order(req: VoiceOrderRequest, db: Session = Depends(get_db)):
         product_names = [p.name for p in products]
 
         prompt = f"""
-        你是一個頂級的 POS 系統點餐解析器。
-        目前店裡的菜單有：{product_names}
-        
-        任務：將客人的口語語音紀錄轉為 JSON 格式。
-        規則：
-        1. 聰明地忽略錯別字與冗言贅字（例如：把「原位」、「圓味」當作「原味」，把「找媒」、「炒梅」當作「草莓」）。
-        2. 將數量轉換為阿拉伯數字（例如：兩個、兩格=2，三盒=3）。
-        3. 【極度重要】請「只」輸出 JSON 格式的字串，絕對不要包含 Markdown 語法（不要有 ```json ），也不要有任何其他說明文字。
-        4. 如果聽不懂或沒有任何符合的品項，請回傳空字典 {{}}。
-        5. 【收款判定】：如果語音包含「已收款、收錢了、付清、結帳」等字眼，請新增 `"is_paid": true` 欄位。
-        6. 【黑科技一 - 備註】：如果客人有特殊要求（如：取餐、幾點取餐、什麼時候來拿），請統整成簡短句子，放入 `"note"` 欄位。
-        7. 【黑科技二 - 刪單】：如果語音明確指示「取消這單、清空、不要了、刪除」，請直接且「只」回傳 {{"action": "clear"}}。
-        
+        任務：將口語點餐轉為 JSON。
+        菜單：{product_names}
+
+        解析規則：
+        1. 容錯辨識：聰明修正同音錯別字（如「圓味/原位」=原味、「找媒/炒梅」=草莓）。
+        2. 數字轉換：中文口語轉純數字（如「兩個/兩格」=2、「三盒」=3）。
+        3. 收款判定：聽到「已收款、收錢了、付清、結帳」，加上 `"is_paid": true`。
+        4. 擷取備註：若有特殊需求（如幾點拿、取餐），統整短句放入 `"note"`。
+        5. 取消指令：若明確指示「取消這單、清空、不要了、刪除」，只回傳 {{"action": "clear"}}。
+        6. 無效判定：若完全聽不懂或無符合品項，回傳 {{}}。
+
         客人語音：「{req.transcript}」
-        期待的 JSON 輸出範例：
-        {{"原味": 2, "金沙": 1, "is_paid": true, "note": "取餐"}}
+        輸出範例：{{"原味": 2, "金沙": 1, "is_paid": true, "note": "下午拿"}}
         """
 
-        # ✅ 返璞歸真版：乾淨純粹的字串
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
         headers = {'Content-Type': 'application/json'}
+        
+        # 🌟 開啟神經直連：強制回傳乾淨的 JSON 格式
         data = {
-            "contents": [{"parts": [{"text": prompt}]}]
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "responseMimeType": "application/json"
+            }
         }
 
         request = urllib.request.Request(url, data=json.dumps(data).encode('utf-8'), headers=headers, method='POST')
