@@ -25,10 +25,6 @@ Base = declarative_base()
 # 取得 Gemini 金鑰
 gemini_key = os.getenv("GEMINI_API_KEY", "")
 
-# ==========================================
-# 🌟 大師優化：依賴注入 (Dependency Injection)
-# 自動管理 Session，避免 Memory Leak 與重複的 try-finally
-# ==========================================
 def get_db():
     db = SessionLocal()
     try:
@@ -74,7 +70,6 @@ class RecipeItem(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# 無痛擴建 items 欄位
 try:
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE orders ADD COLUMN items VARCHAR"))
@@ -84,8 +79,14 @@ except Exception:
 # ==========================================
 # 3. 定義接收資料的格式 (Pydantic)
 # ==========================================
+# ✨ 大師加持：加入 created_at 允許接收補登時間
 class OrderData(BaseModel):
-    order_no: str; total_amount: int; received: bool; items: Optional[str] = ""; note: Optional[str] = ""
+    order_no: str
+    total_amount: int
+    received: bool
+    items: Optional[str] = ""
+    note: Optional[str] = ""
+    created_at: Optional[str] = None 
 
 class RecipeInput(BaseModel):
     material_id: int; consume_qty: float
@@ -146,7 +147,6 @@ def init_inventory(db: Session = Depends(get_db)):
         db.rollback()
         return {"status": "error", "message": str(e)}
 
-# --- 🌟 終極殺招：原生 API 直連語音解析引擎 ---
 @app.post("/api/ai/parse-order")
 def parse_voice_order(req: VoiceOrderRequest, db: Session = Depends(get_db)):
     if not gemini_key:
@@ -156,12 +156,11 @@ def parse_voice_order(req: VoiceOrderRequest, db: Session = Depends(get_db)):
         products = db.query(Product).all()
         product_names = [p.name for p in products]
 
-        # 🌟 大師提速與防呆心法：加入「強制正名辭典」與「全包/排除陣法」
         prompt = f"""
         任務：將口語點餐轉為 JSON。
         標準菜單：{product_names}
 
-        【強制正名辭典】（遇到以下發音或俗稱，一律轉換為標準菜單名稱）：
+        【強制正名辭典】：
         - 泰奶：太乃、泰式、泰式奶茶、泰國奶茶
         - 鮪玉：鮪魚玉米、尾玉、尾魚、鮪魚
         - 菜脯米：菜脯、菜圃、蘿蔔絲、ㄘㄞˋㄅㄛ˙
@@ -186,12 +185,9 @@ def parse_voice_order(req: VoiceOrderRequest, db: Session = Depends(get_db)):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
         headers = {'Content-Type': 'application/json'}
         
-        # 🌟 開啟神經直連：強制回傳乾淨的 JSON 格式
         data = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "responseMimeType": "application/json"
-            }
+            "generationConfig": {"responseMimeType": "application/json"}
         }
 
         request = urllib.request.Request(url, data=json.dumps(data).encode('utf-8'), headers=headers, method='POST')
@@ -200,7 +196,7 @@ def parse_voice_order(req: VoiceOrderRequest, db: Session = Depends(get_db)):
             result = json.loads(response.read().decode('utf-8'))
             res_text = result['candidates'][0]['content']['parts'][0]['text']
 
-            res_text = res_text.replace("```json", "").replace("```", "").strip()
+            res_text = res_text.replace("```json\n", "").replace("```json", "").replace("```", "").strip()
             parsed_json = json.loads(res_text)
 
         return {"status": "success", "data": parsed_json}
@@ -218,12 +214,28 @@ def parse_voice_order(req: VoiceOrderRequest, db: Session = Depends(get_db)):
 def create_orders(orders: List[OrderData], db: Session = Depends(get_db)):
     try:
         for o in orders: 
-            db.add(Order(order_no=o.order_no, total_amount=o.total_amount, received=o.received, items=o.items, note=o.note))
+            # ✨ 大師加持：處理補登時間邏輯
+            order_time = datetime.datetime.utcnow()
+            if o.created_at:
+                try:
+                    parsed_time = datetime.datetime.fromisoformat(o.created_at.replace("Z", "+00:00"))
+                    order_time = parsed_time.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+                except Exception as e:
+                    print(f"補登時間解析失敗: {e}")
+
+            db.add(Order(
+                order_no=o.order_no, 
+                total_amount=o.total_amount, 
+                received=o.received, 
+                items=o.items, 
+                note=o.note,
+                created_at=order_time # 存入指定時間
+            ))
         db.commit()
         return {"status": "success"}
     except Exception as e: 
         db.rollback()
-        return {"status": "error"}
+        return {"status": "error", "message": str(e)}
 
 @app.get("/api/orders")
 def get_orders(db: Session = Depends(get_db)):
